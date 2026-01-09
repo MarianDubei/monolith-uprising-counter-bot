@@ -66,7 +66,7 @@ ALL_ARMOR: Set[str] = set()
 ALL_ARMOR |= set(STALKER_ARMOR)
 ALL_ARMOR |= set(MONOLITH_ARMOR)
 
-MONOLITH_MULTIPLIER = 2
+MONOLITH_MULTIPLIER = 1.75
 
 FLAT_EQUIPMENT_BONUSES: Dict[str, int] = {
     "UDP": 3,
@@ -459,7 +459,7 @@ def _parse_monolith_loot_message(content: str) -> Optional[Tuple[int, str]]:
         return None
 
     # Parse item from the full text (bots often keep it in one line/sentence)
-    text = "\n".join(lines)
+    text = "\n".join(lines).replace('.', '')
     m = re.search(r"\byou got\s+(.+?)\s*$", text, flags=re.IGNORECASE)
     if not m:
         return None
@@ -628,6 +628,7 @@ async def parse_roll_embed_message(message: discord.Message) -> Tuple[int, int, 
 
     # 2) user_id from embed.description
     desc = e.description or ""
+    
     m = USER_MENTION_RE.search(desc)
     if not m:
         raise ValueError("No <@userid> mention found in embed.description.")
@@ -858,7 +859,18 @@ async def count_rolls_in_channel(
     scanned = 0
     matched = 0
     weird_flower_pairs: List[str] = []
-
+    monolith_cnt = 0
+    stalker_cnt = 0
+    monolith_users: Set[str] = set()
+    stalker_users: Set[str] = set()
+    monolith_pairs = 0
+    stalker_pairs = 0
+    split_pairs = 0
+    mon_weird_flower_rolls = 0
+    sta_weird_flower_rolls = 0
+    mon_weird_flower_carriers = set()
+    sta_weird_flower_carriers = set()
+    
     await interaction.edit_original_response(content="Stage 2/2: parsing rolls…")
     async for msg in channel.history(after=start_utc, before=end_utc, limit=None, oldest_first=True):
         scanned += 1
@@ -875,9 +887,7 @@ async def count_rolls_in_channel(
         except Exception:
             # Skip messages that aren't the roll embed format
             continue
-
         faction = get_faction(roles)
-
         # Pick faction equipment list + looted dictionary
         if faction in MONOLITH_FACTIONS:
             faction_equipment_list = set(MONOLITH_ALL_EQUIPMENT)
@@ -886,16 +896,19 @@ async def count_rolls_in_channel(
             if faction in TRANSITIONED_FACTIONS:
                 faction_equipment_list |= STALKERS_ALL_EQUIPMENT
                 faction_looted_dict = merged_looted
+            monolith_cnt += 1
+            monolith_users.add(userid)
         else:
             faction_equipment_list = STALKERS_ALL_EQUIPMENT
             faction_looted_dict = stalkers_looted
             is_monolith = False
+            stalker_cnt += 1
+            stalker_users.add(userid)
 
         equipped = get_equipped_equipment(roles, faction_equipment_list)
         equipped = filter_redundant_armor(equipped, roles, userid, roll, faction, faction_looted_dict)
         
         cheating, fake_list = is_cheating(equipped, userid, faction_looted_dict)
-
         if cheating:
             cheaters_ids = [pair[0] for pair in cheaters]
             if (userid not in cheaters_ids):
@@ -910,11 +923,25 @@ async def count_rolls_in_channel(
             # if Weird Flower is detected, the roll is not calculated and kept in the dictionary
             # till the end of parsing. 
             if "Weird Flower" in equipped:
+                if faction in MONOLITH_FACTIONS:
+                    mon_weird_flower_rolls += 1
+                    mon_weird_flower_carriers.add(userid)
+                else:
+                    sta_weird_flower_rolls += 1
+                    sta_weird_flower_carriers.add(userid)
+                    
                 if roll in weird_flower_carriers:
                     # handle detected pair with Weird Flowers
                     paired_userid, paired_faction, paired_equipped = weird_flower_carriers[roll]
                     pair_string = f"(roll {roll}): `{userid}`, `{paired_userid}`"
                     print(f"[DEBUG] Pair with Weird Flowers detected {pair_string}")
+                    if faction == paired_faction:
+                        if faction in MONOLITH_FACTIONS:
+                            monolith_pairs += 1
+                        else:
+                            stalker_pairs += 1
+                    else:
+                        split_pairs += 1
                     weird_flower_pairs.append(pair_string)
                     del weird_flower_carriers[roll]
                     paired_roll = WEIRD_FLOWER_PAIR_ROLL
@@ -963,7 +990,15 @@ async def count_rolls_in_channel(
     print(f"Messages matched (by author): {matched}")
     print(f"Monolith total score: {monolith_total} x {MONOLITH_MULTIPLIER} = {monolith_total * MONOLITH_MULTIPLIER}")
     print(f"STALKERS total score: {stalkers_total}")
-
+    print(f"Monolith rolls = {monolith_cnt}, STALKERS rolls = {stalker_cnt}")
+    print(f"Monolith members = {len(monolith_users)}, STALKERS members = {len(stalker_users)}")
+    print(f"Average {monolith_cnt/len(monolith_users)} rolls per mоnolithian")
+    print(f"Average {stalker_cnt/len(stalker_users)} rolls per stalker")
+    print(f"Weird Flower pairs: STALKER only = {stalker_pairs}, Monolith only = {monolith_pairs}, split = {split_pairs}, total = {stalker_pairs + monolith_pairs + split_pairs}")
+    print(f"Weird Flower carriers: STALKERS - {len(sta_weird_flower_carriers)}, Monolith - {len(mon_weird_flower_carriers)}")
+    print(f"Rolls from Weird Flower carriers: STALKERS - {sta_weird_flower_rolls}, Monolith - {mon_weird_flower_rolls}")
+    print(f"Average rolls per Weird Flower carrier: STALKERS - {sta_weird_flower_rolls/len(sta_weird_flower_carriers)}, Monolith - {mon_weird_flower_rolls/len(mon_weird_flower_carriers)}")
+    
     if cheaters:
         print("=== CHEATERS ===")
         for uid, faction in cheaters:
@@ -1067,28 +1102,42 @@ async def count_rolls(
         f"**STALKERS total score:** {stalkers_total}",
         "",
         f"**Cheaters:** {len(cheaters)}",
+        f"**Weird Flower Pairs:** {len(weird_flower_pairs)}",
     ]
+    file_lines = []
     if cheaters:
         # cap output so it doesn't get too long
         for uid, faction in cheaters[:50]:
             fake = cheater_fake_map.get(uid, [])
             fake_str = ", ".join(fake) if fake else "(no items listed)"
-            lines.append(f"- `{uid}`({faction}): {fake_str}")
+            file_lines.append(f"- `{uid}`({faction}): {fake_str}")
         if len(cheaters) > 20:
-            lines.append(f"...and {len(cheaters) - 20} more.")
+            file_lines.append(f"...and {len(cheaters) - 20} more.")
     
-    lines.append(f"\n**Weird Flower Pairs:** {len(weird_flower_pairs)}")
+    file_lines.append(f"\n**Weird Flower Pairs:** {len(weird_flower_pairs)}")
     if weird_flower_pairs:
         for pair_line in weird_flower_pairs:
-            lines.append(pair_line)
+            file_lines.append(pair_line)
     
     global global_faction_wars_24_checks
     global_faction_wars_24_checks.sort()
     if global_faction_wars_24_checks:
-        lines.append("\n **Here is the list of users with possible Faction Wars 24 equipment**, that should be validated manually in case it may change the result of the battle. The equipment bonuses are already added to the score, subtract the bonus if the equipment is confirmed to be from 2024 event (no reaction on armor-role-selection message). If the equipment is present, please check it for cheating as well (you can use /is_cheater author:@Wolf user:<userid>)")
+        file_lines.append("\n **Here is the list of users with possible Faction Wars 24 equipment**, that should be validated manually in case it may change the result of the battle. The equipment bonuses are already added to the score, subtract the bonus if the equipment is confirmed to be from 2024 event (no reaction on armor-role-selection message). If the equipment is present, please check it for cheating as well (you can use /is_cheater author:@Wolf user:<userid>)")
         for check_line in global_faction_wars_24_checks:
-            lines.append(check_line)
+            file_lines.append(check_line)
     global_faction_wars_24_checks = []
+    
+    # write file_lines to a txt file (overwrite each run)
+    safe_channel_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in channel.name)
+    out_path = f"info_{safe_channel_name}.txt"
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(file_lines))
+
+    txt_file = discord.File(out_path, filename=out_path)
+
+    # send main text + attach file
+    # await interaction.edit_original_response(content="\n".join(lines), attachments=[txt_file])
     await interaction.edit_original_response(content="\n".join(lines))
 
 @bot.tree.command(
